@@ -1,0 +1,6 @@
+﻿.calendar-table td { border: 1px solid #ccc; position: relative; }
+.current-day { background-color: #f0f8ff; }
+.current-slot { background-color: #ffe4e1; }
+.slot-selected { background-color: #ffeb3b !important; }
+.event-box { position: absolute; background: #2196F3; color: #fff; border-radius: 4px; font-size: 12px; padding: 2px; cursor: move; }
+.resize-handle { height: 5px; background: #000; cursor: ns-resize; position: absolute; bottom: 0; left: 0; right: 0; }
