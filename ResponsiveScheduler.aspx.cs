@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Data.SqlClient;
+using System.Reflection;
 using System.Web.Configuration;
 using System.Web.Services;
 using System.Web.UI.WebControls;
@@ -52,6 +54,34 @@ namespace CalendarScheduler
         {
             GenerateSchedulerView(DateTime.Parse(txtFrom.Text), DateTime.Parse(txtTo.Text));
         }
+        public  DataTable ToDataTable<T>(List<T> items)
+        {
+            DataTable table = new DataTable(typeof(T).Name);
+
+            if (items == null || items.Count == 0)
+                return table;
+
+            // Get all the properties of the object
+            PropertyInfo[] properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (PropertyInfo prop in properties)
+            {
+                // Create a column for each property
+                table.Columns.Add(prop.Name, Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType);
+            }
+
+            foreach (T item in items)
+            {
+                var values = new object[properties.Length];
+                for (int i = 0; i < properties.Length; i++)
+                {
+                    values[i] = properties[i].GetValue(item, null) ?? DBNull.Value;
+                }
+                table.Rows.Add(values);
+            }
+
+            return table;
+        }
 
         private void GenerateSchedulerView(DateTime startDate, DateTime endDate)
         {
@@ -59,66 +89,92 @@ namespace CalendarScheduler
             currentStartDate = startDate;
             currentEndDate = endDate;
             int totalDays = (endDate - startDate).Days + 1;
-            Table table = new Table { CssClass = "calendar-table" };
 
-            // Header
+            Table table = new Table { CssClass = "calendar-table", Width = Unit.Percentage(100) };
+
+            // Header row
             TableRow header = new TableRow();
-            header.Cells.Add(new TableCell { Text = "Time" });
+            TableCell timeHeader = new TableCell { Text = "Time" };
+            timeHeader.Width = Unit.Pixel(80);
+            header.Cells.Add(timeHeader);
+
             for (int i = 0; i < totalDays; i++)
             {
                 DateTime day = startDate.AddDays(i);
                 TableCell cell = new TableCell { Text = day.ToString("ddd dd/MM"), CssClass = "resizable-col" };
                 cell.Attributes["data-date"] = day.ToString("yyyy-MM-dd");
-                if (day.Date == DateTime.Today) cell.CssClass += " current-day";
+
+                if (day.Date == DateTime.Today)
+                {
+                    cell.CssClass += " current-day";
+                    cell.Width = Unit.Pixel(120); // wider current day
+                }
+
                 header.Cells.Add(cell);
             }
             table.Rows.Add(header);
 
-            int pixelsPerSlot = 20;
+            int pixelsPerSlot = 80; // each row height
+
+            // Time rows
             for (TimeSpan t = startTime; t < endTime; t = t.Add(TimeSpan.FromMinutes(slotMinutes)))
             {
                 TableRow row = new TableRow();
-                row.Cells.Add(new TableCell { Text = DateTime.Today.Add(t).ToString("hh:mm tt"), CssClass = "time-cell" });
+                row.Height = Unit.Pixel(pixelsPerSlot);
+
+                TableCell timeCell = new TableCell { Text = DateTime.Today.Add(t).ToString("hh:mm tt"), CssClass = "time-cell" };
+                timeCell.Width = Unit.Pixel(80);
+                row.Cells.Add(timeCell);
 
                 for (int i = 0; i < totalDays; i++)
                 {
+                    DateTime day = startDate.AddDays(i);
                     TableCell cell = new TableCell();
                     cell.Style["position"] = "relative";
                     cell.Attributes["data-time"] = t.ToString(@"hh\:mm");
-                    cell.Attributes["data-date"] = startDate.AddDays(i).ToString("yyyy-MM-dd");
-                    cell.Attributes["onclick"] = "highlightSlot(this);";
+                    cell.Attributes["data-date"] = day.ToString("yyyy-MM-dd");
+
+                    if (day.Date == DateTime.Today)
+                        cell.Style["width"] = "120px";
 
                     Panel container = new Panel { CssClass = "day-container" };
+                    container.Style["position"] = "relative"; // needed for absolute event blocks
                     cell.Controls.Add(container);
-
-                    DateTime slotDateTime = startDate.AddDays(i).Add(t);
-                    if (slotDateTime >= DateTime.Now && slotDateTime < DateTime.Now.AddMinutes(slotMinutes))
-                        cell.CssClass += " current-slot";
 
                     row.Cells.Add(cell);
                 }
+
                 table.Rows.Add(row);
             }
 
             // Load events
             var events = DataAccess.GetEventsInRange(startDate, endDate);
-            RenderEvents(events, table, pixelsPerSlot);
+            DataTable dtEvents = ToDataTable(events);
+            RenderEvents(dtEvents, table, pixelsPerSlot);
 
             phCalendar.Controls.Add(table);
         }
-        private void RenderEvents(List<CalendarEvent> events, Table table, int pixelsPerSlot)
+        private void RenderEvents(DataTable events, Table table, int pixelsPerSlot)
         {
-            if (events == null || table.Rows.Count < 2) return;
+            if (events == null || events.Rows.Count == 0 || table.Rows.Count < 2) return;
 
             TableRow header = table.Rows[0];
+            DateTime now = DateTime.Now;
 
-            foreach (var ev in events)
+            foreach (DataRow ev in events.Rows)
             {
-                // Find the correct column for this event
+                DateTime startTimeEv = Convert.ToDateTime(ev["StartTime"]);
+                DateTime endTimeEv = Convert.ToDateTime(ev["EndTime"]);
+                string status = ev["Status"] != DBNull.Value ? ev["Status"].ToString().ToLower() : "";
+                string title = ev["Title"] != DBNull.Value ? ev["Title"].ToString() : "";
+
+                // Find column index
                 int colIndex = -1;
                 for (int c = 1; c < header.Cells.Count; c++)
                 {
-                    if (DateTime.Parse(header.Cells[c].Attributes["data-date"]).Date == ev.StartTime.Date)
+                    string dateStr = header.Cells[c].Attributes["data-date"];
+                    if (string.IsNullOrEmpty(dateStr)) continue;
+                    if (DateTime.Parse(dateStr).Date == startTimeEv.Date)
                     {
                         colIndex = c;
                         break;
@@ -126,94 +182,254 @@ namespace CalendarScheduler
                 }
                 if (colIndex == -1) continue;
 
-                // Calculate top position and height in pixels
-                int top = (int)((ev.StartTime.TimeOfDay - startTime).TotalMinutes / slotMinutes) * pixelsPerSlot;
-                int height = (int)((ev.EndTime - ev.StartTime).TotalMinutes / slotMinutes) * pixelsPerSlot;
-
-                // Determine status class
-                string statusClass = "status-pending";
-                if (!string.IsNullOrEmpty(ev.Status))
+                // Calculate top position in pixels
+                double totalTop = 0;
+                int startRow = -1;
+                for (int r = 1; r < table.Rows.Count; r++)
                 {
-                    string st = ev.Status.ToLower();
-                    if (st == "pending") statusClass = "status-pending";
-                    else if (st == "confirmed") statusClass = "status-confirmed";
-                    else if (st == "cancelled") statusClass = "status-cancelled";
+                    TableCell cell = table.Rows[r].Cells[colIndex];
+                    string slotTimeStr = cell.Attributes["data-time"];
+                    if (string.IsNullOrEmpty(slotTimeStr)) continue;
+
+                    TimeSpan slotTime = TimeSpan.Parse(slotTimeStr);
+                    DateTime slotDateTime = startTimeEv.Date.Add(slotTime);
+
+                    if (startRow == -1 && slotDateTime <= startTimeEv && startTimeEv < slotDateTime.Add(TimeSpan.FromMinutes(slotMinutes)))
+                    {
+                        startRow = r;
+                        double minutesIntoSlot = (startTimeEv - slotDateTime).TotalMinutes;
+                        totalTop = (r - 1) * pixelsPerSlot + (minutesIntoSlot / slotMinutes) * pixelsPerSlot;
+                        break;
+                    }
                 }
+                if (startRow == -1) continue;
 
-                // Build HTML for the event
-                string divHtml = string.Format(
-                    "<div class='event-box {0}' data-id='{1}' style='top:{2}px;height:{3}px;left:2px;right:2px;position:absolute;'>{4}</div>",
-                    statusClass, ev.Id, top, height, ev.Title
-                );
+                // Calculate height in pixels
+                double eventDurationMinutes = (endTimeEv - startTimeEv).TotalMinutes;
+                double height = (eventDurationMinutes / slotMinutes) * pixelsPerSlot;
+                if (height < 20) height = 20;
 
-                // Add to the container inside the cell
-                TableCell cell = table.Rows[1].Cells[colIndex]; // Make sure Rows[1] exists
-                if (cell.Controls.Count > 0)
+                // Colors and progress
+                string progressColor = "#4CAF50";
+                string titleColor = "#000";
+                if (status == "pending") { progressColor = "#FFC107"; titleColor = "#FF9800"; }
+                else if (status == "cancelled") { progressColor = "#9E9E9E"; titleColor = "#757575"; }
+                else if (status == "completed") { progressColor = "#4CAF50"; titleColor = "#2E7D32"; }
+                if (now > endTimeEv && status != "completed") { progressColor = "#f44336"; titleColor = "#D32F2F"; }
+
+                double totalMinutes = (endTimeEv - startTimeEv).TotalMinutes;
+                double elapsedMinutes = (now - startTimeEv).TotalMinutes;
+                if (elapsedMinutes < 0) elapsedMinutes = 0;
+                if (elapsedMinutes > totalMinutes) elapsedMinutes = totalMinutes;
+                int progressPercent = totalMinutes > 0 ? (int)((elapsedMinutes / totalMinutes) * 100) : 0;
+
+                bool isInProgress = now >= startTimeEv && now <= endTimeEv && status != "completed";
+                string blinkClass = isInProgress ? "blink" : "";
+
+                // Add to first row's container
+                TableCell firstCell = table.Rows[1].Cells[colIndex];
+                if (firstCell.Controls.Count > 0)
                 {
-                    Panel container = cell.Controls[0] as Panel;
+                    Panel container = firstCell.Controls[0] as Panel;
                     if (container != null)
                     {
-                        Literal lit = new Literal { Text = divHtml };
-                        container.Controls.Add(lit);
+                        string divHtml = @"
+                        <div class='event-box {blinkClass}' style='position:absolute;top:{totalTop}px;height:{height}px;left:2px;right:2px;
+                            border:1px solid #ccc;border-radius:6px;background:#fff;overflow:hidden;'>
+                            <div style='height:20px;font-size:12px;font-weight:bold;padding-left:4px;color:{titleColor};
+                                line-height:20px;overflow:hidden;text-overflow:ellipsis;'>{title}</div>
+                            <div style='position:absolute;bottom:4px;left:4px;right:4px;height:4px;background:#eee;border-radius:2px;'>
+                                <div style='height:4px;width:{progressPercent}%;background:{progressColor};border-radius:2px;
+                                    transition:width 0.5s;'></div>
+                            </div>
+                        </div>";
+                      container.Controls.Add(new Literal { Text = divHtml });
                     }
                 }
             }
         }
-
-        //private void RenderEvents(List<CalendarEvent> events, Table table, int pixelsPerSlot)
+        //=========================
+        // 1. Generate Scheduler View
+        //=========================
+        //private void GenerateSchedulerView(DateTime startDate, DateTime endDate)
         //{
-        //    TableRow header = table.Rows[0];
-        //    foreach (var ev in events)
+        //    phCalendar.Controls.Clear();
+        //    currentStartDate = startDate;
+        //    currentEndDate = endDate;
+        //    int totalDays = (endDate - startDate).Days + 1;
+        //    Table table = new Table { CssClass = "calendar-table", Width = Unit.Percentage(100) };
+
+        //    // Header row
+        //    TableRow header = new TableRow();
+        //    TableCell timeHeader = new TableCell { Text = "Time" };
+        //    timeHeader.Width = Unit.Pixel(80);
+        //    header.Cells.Add(timeHeader);
+
+        //    for (int i = 0; i < totalDays; i++)
         //    {
-        //        int colIndex = -1;
-        //        for (int c = 1; c < header.Cells.Count; c++)
+        //        DateTime day = startDate.AddDays(i);
+        //        TableCell cell = new TableCell { Text = day.ToString("ddd dd/MM"), CssClass = "resizable-col" };
+        //        cell.Attributes["data-date"] = day.ToString("yyyy-MM-dd");
+
+        //        if (day.Date == DateTime.Today)
         //        {
-        //            if (DateTime.Parse(header.Cells[c].Attributes["data-date"]).Date == ev.StartTime.Date)
+        //            cell.CssClass += " current-day";
+        //            cell.Width = Unit.Pixel(120); // wider current day
+        //        }
+
+        //        header.Cells.Add(cell);
+        //    }
+        //    table.Rows.Add(header);
+
+        //    int pixelsPerSlot = 80; // row height
+
+        //    // Time rows
+        //    for (TimeSpan t = startTime; t < endTime; t = t.Add(TimeSpan.FromMinutes(slotMinutes)))
+        //    {
+        //        TableRow row = new TableRow();
+        //        row.Height = Unit.Pixel(pixelsPerSlot);
+
+        //        TableCell timeCell = new TableCell { Text = DateTime.Today.Add(t).ToString("hh:mm tt"), CssClass = "time-cell" };
+        //        timeCell.Width = Unit.Pixel(80);
+        //        row.Cells.Add(timeCell);
+
+        //        for (int i = 0; i < totalDays; i++)
+        //        {
+        //            DateTime day = startDate.AddDays(i);
+        //            TableCell cell = new TableCell();
+        //            cell.Style["position"] = "relative";
+        //            cell.Attributes["data-time"] = t.ToString(@"hh\:mm");
+        //            cell.Attributes["data-date"] = day.ToString("yyyy-MM-dd");
+
+        //            if (day.Date == DateTime.Today)
+        //                cell.Style["width"] = "120px";
+
+        //            Panel container = new Panel { CssClass = "day-container" };
+        //            cell.Controls.Add(container);
+
+        //            row.Cells.Add(cell);
+        //        }
+
+        //        table.Rows.Add(row);
+        //    }
+
+        //    // Load events
+        //   // DataTable dtevents = GetData(startDate, endDate);
+        //    var events = DataAccess.GetEventsInRange(startDate, endDate);
+        //    DataTable dtEvents = ToDataTable(events);
+        //    RenderEvents(dtEvents, table, pixelsPerSlot);
+
+        //    phCalendar.Controls.Add(table);
+        //}
+
+
+
+        //=========================
+        // 2. Render Events
+        //=========================
+        //        private void RenderEvents(DataTable events, Table table, int pixelsPerSlot)
+        //        {
+        //            if (events == null || events.Rows.Count == 0 || table.Rows.Count < 2) return;
+
+        //            TableRow header = table.Rows[0];
+        //            DateTime now = DateTime.Now;
+
+        //            foreach (DataRow ev in events.Rows)
         //            {
-        //                colIndex = c;
-        //                break;
+        //                DateTime startTimeEv = Convert.ToDateTime(ev["StartTime"]);
+        //                DateTime endTimeEv = Convert.ToDateTime(ev["EndTime"]);
+        //                string status = ev["Status"] != DBNull.Value ? ev["Status"].ToString().ToLower() : "";
+        //                string title = ev["Title"] != DBNull.Value ? ev["Title"].ToString() : "";
+
+        //                // Column index
+        //                int colIndex = -1;
+        //                for (int c = 1; c < header.Cells.Count; c++)
+        //                {
+        //                    string dateStr = header.Cells[c].Attributes["data-date"];
+        //                    if (string.IsNullOrEmpty(dateStr)) continue;
+        //                    if (DateTime.Parse(dateStr).Date == startTimeEv.Date)
+        //                    {
+        //                        colIndex = c;
+        //                        break;
+        //                    }
+        //                }
+        //                if (colIndex == -1) continue;
+
+        //                // Start and end rows
+        //                int startRow = -1, endRow = -1;
+        //                for (int r = 1; r < table.Rows.Count; r++)
+        //                {
+        //                    TableCell cell = table.Rows[r].Cells[colIndex];
+        //                    string slotTimeStr = cell.Attributes["data-time"];
+        //                    if (string.IsNullOrEmpty(slotTimeStr)) continue;
+        //                    TimeSpan slotTime = TimeSpan.Parse(slotTimeStr);
+        //                    DateTime slotDateTime = startTimeEv.Date.Add(slotTime);
+
+        //                    if (startRow == -1 && slotDateTime >= startTimeEv) startRow = r;
+        //                    if (slotDateTime < endTimeEv) endRow = r;
+        //                }
+        //                if (startRow == -1 || endRow == -1) continue;
+
+        //                int rowSpan = endRow - startRow + 1;
+
+        //                // Colors
+        //                string progressColor = "#4CAF50";
+        //                string titleColor = "#000";
+        //                if (status == "pending") { progressColor = "#FFC107"; titleColor = "#FF9800"; }
+        //                else if (status == "cancelled") { progressColor = "#9E9E9E"; titleColor = "#757575"; }
+        //                else if (status == "completed") { progressColor = "#4CAF50"; titleColor = "#2E7D32"; }
+        //                if (now > endTimeEv && status != "completed") { progressColor = "#f44336"; titleColor = "#D32F2F"; }
+
+        //                double totalMinutes = (endTimeEv - startTimeEv).TotalMinutes;
+        //                double elapsedMinutes = (now - startTimeEv).TotalMinutes;
+        //                if (elapsedMinutes < 0) elapsedMinutes = 0;
+        //                if (elapsedMinutes > totalMinutes) elapsedMinutes = totalMinutes;
+        //                int progressPercent = totalMinutes > 0 ? (int)((elapsedMinutes / totalMinutes) * 100) : 0;
+
+        //                bool isInProgress = now >= startTimeEv && now <= endTimeEv && status != "completed";
+        //                string blinkClass = isInProgress ? "blink" : "";
+
+        //                // Event cell
+        //                TableCell eventCell = new TableCell();
+        //                eventCell.RowSpan = rowSpan;
+        //                eventCell.CssClass = "event-cell";
+        //                eventCell.Style.Add("position", "relative");
+        //                eventCell.Style.Add("padding", "0");
+
+        //                Panel container = new Panel { CssClass = "day-container" };
+        //                eventCell.Controls.Add(container);
+
+        //                // Adjust width for current day
+        //                TableRow headerRow = table.Rows[0];
+        //                if (headerRow.Cells[colIndex].CssClass.Contains("current-day"))
+        //                    container.Style["width"] = "116px"; // slightly smaller than 120px
+        //                else
+        //                    container.Style["width"] = "100%";
+
+        //                string divHtml = @"
+        //<div class='event-box {blinkClass}' style='position:absolute;top:0;bottom:0;left:2px;right:2px;
+        //    border:1px solid #ccc;border-radius:6px;background:#fff;overflow:hidden;'>
+        //    <div style='height:20px;font-size:12px;font-weight:bold;padding-left:4px;color:{titleColor};
+        //        line-height:20px;overflow:hidden;text-overflow:ellipsis;'>{title}</div>
+        //    <div style='position:absolute;bottom:4px;left:4px;right:4px;height:4px;background:#eee;border-radius:2px;'>
+        //        <div style='height:4px;width:{progressPercent}%;background:{progressColor};border-radius:2px;
+        //            transition:width 0.5s;'></div>
+        //    </div>
+        //</div>";
+
+        //                container.Controls.Add(new Literal { Text = divHtml });
+
+        //                TableRow startTableRow = table.Rows[startRow];
+        //                startTableRow.Cells.RemoveAt(colIndex);
+        //                startTableRow.Cells.AddAt(colIndex, eventCell);
+
+        //                for (int r = startRow + 1; r <= endRow; r++)
+        //                {
+        //                    table.Rows[r].Cells[colIndex].Visible = false;
+        //                }
         //            }
         //        }
-        //        if (colIndex == -1) continue;
 
-        //        int top = (int)((ev.StartTime.TimeOfDay - startTime).TotalMinutes / slotMinutes) * pixelsPerSlot;
-        //        int height = (int)((ev.EndTime - ev.StartTime).TotalMinutes / slotMinutes) * pixelsPerSlot;
-
-        //        Panel div = new Panel { CssClass = "event-box" };
-        //        div.Style["top"] = top + "px";
-        //        div.Style["height"] = height + "px";
-        //        div.Style["left"] = "2px"; div.Style["right"] = "2px";
-        //        div.Attributes["data-id"] = ev.Id.ToString();
-        //        div.Controls.Add(new Literal { Text = ev.Title });
-
-        //        switch (ev.Status.ToLower())
-        //        {
-        //            case "pending": div.CssClass += " status-pending"; break;
-        //            case "confirmed": div.CssClass += " status-confirmed"; break;
-        //            case "cancelled": div.CssClass += " status-cancelled"; break;
-        //        }
-
-        //        Panel container = table.Rows[1].Cells[colIndex].Controls[0] as Panel;
-        //        container.Controls.Add(div);
-        //    }
-        //}
-
-        //[WebMethod]
-        //public static void SaveEvent(string title, string date, string time, string status)
-        //{
-        //    DateTime start = DateTime.Parse(date + " " + time);
-        //    DateTime end = start.AddMinutes(30); // default 30 mins
-        //    using (var conn = new SqlConnection("YOUR_CONNECTION_STRING"))
-        //    {
-        //        string sql = "INSERT INTO Events(Title,StartTime,EndTime,Status) VALUES(@title,@start,@end,@status)";
-        //        SqlCommand cmd = new SqlCommand(sql, conn);
-        //        cmd.Parameters.AddWithValue("@title", title);
-        //        cmd.Parameters.AddWithValue("@start", start);
-        //        cmd.Parameters.AddWithValue("@end", end);
-        //        cmd.Parameters.AddWithValue("@status", status);
-        //        conn.Open(); cmd.ExecuteNonQuery();
-        //    }
-        //}
         [WebMethod]
         public static void SaveEvent(string title, string date, string startTime, string endTime, string status)
         {
